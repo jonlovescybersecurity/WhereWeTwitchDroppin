@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from channel import Channel
-from exceptions import MinerException
+from exceptions import ExitRequest, MinerException, ReloadRequest
 from twitch import Twitch
 
 
@@ -21,6 +21,42 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await channel.send_watch())
         self.assertIsNone(channel._spade_url)
         channel._twitch.request.assert_not_called()
+
+    async def test_shutdown_and_reload_escape_watch_endpoint_handler(self):
+        for signal in (ExitRequest, ReloadRequest):
+            with self.subTest(signal=signal):
+                channel = Channel.__new__(Channel)
+                channel._stream = SimpleNamespace(spade_payload={})
+                channel._spade_url = None
+                with patch.object(Channel, "get_spade_url", new_callable=AsyncMock) as endpoint:
+                    endpoint.side_effect = signal()
+                    with self.assertRaises(signal):
+                        await channel.send_watch()
+
+    async def test_malformed_current_drop_does_not_end_watch_task(self):
+        for payload in ({}, [], {"dropID": "known"},
+                        {"dropID": "known", "currentMinutesWatched": "12"}):
+            with self.subTest(payload=payload):
+                miner = Twitch.__new__(Twitch)
+                channel = SimpleNamespace(
+                    name="streamer", online=True, id=123,
+                    send_watch=AsyncMock(return_value=True),
+                )
+                miner.watching_channel = SimpleNamespace(
+                    get=AsyncMock(side_effect=[channel, asyncio.CancelledError()]),
+                    get_with_default=lambda default: channel,
+                )
+                miner._watching_restart = asyncio.Event()
+                miner._watch_sleep = AsyncMock()
+                miner.gui = SimpleNamespace(progress=SimpleNamespace(minute_almost_done=lambda: True))
+                drop = SimpleNamespace(can_earn=lambda channel: True, update_minutes=Mock())
+                miner._drops = {"known": drop}
+                miner.gql_request = AsyncMock(return_value={
+                    "data": {"currentUser": {"dropCurrentSession": payload}}
+                })
+                with self.assertRaises(asyncio.CancelledError):
+                    await miner._watch_loop()
+                drop.update_minutes.assert_not_called()
 
     async def test_switch_wakes_a_waiting_watch_loop(self):
         miner = Twitch.__new__(Twitch)
