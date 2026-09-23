@@ -929,10 +929,21 @@ class Twitch:
                     )
                 except (GQLException, KeyError, TypeError):
                     drop_data = None
-                if drop_data is not None:
-                    gql_drop: TimedDrop | None = self._drops.get(drop_data["dropID"])
-                    if gql_drop is not None and gql_drop.can_earn(channel):
-                        gql_drop.update_minutes(drop_data["currentMinutesWatched"])
+                if isinstance(drop_data, dict):
+                    drop_id = drop_data.get("dropID")
+                    minutes = drop_data.get("currentMinutesWatched")
+                    gql_drop: TimedDrop | None = (
+                        self._drops.get(drop_id) if isinstance(drop_id, str) else None
+                    )
+                    if (
+                        gql_drop is not None
+                        and type(minutes) is int
+                        and minutes >= 0
+                        and not self._watching_restart.is_set()
+                        and self.watching_channel.get_with_default(None) is channel
+                        and gql_drop.can_earn(channel)
+                    ):
+                        gql_drop.update_minutes(minutes)
                         drop_text: str = (
                             f"{gql_drop.name} ({gql_drop.campaign.game}, "
                             f"{gql_drop.current_minutes}/{gql_drop.required_minutes})"
