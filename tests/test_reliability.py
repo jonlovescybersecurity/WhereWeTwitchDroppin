@@ -3,12 +3,25 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
+from channel import Channel
+from exceptions import MinerException
 from twitch import Twitch
 
 
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_watch_endpoint_is_retryable(self):
+        channel = Channel.__new__(Channel)
+        channel._stream = SimpleNamespace(spade_payload={})
+        channel._spade_url = None
+        channel._twitch = SimpleNamespace(request=Mock())
+        with patch.object(Channel, "get_spade_url", new_callable=AsyncMock) as endpoint:
+            endpoint.side_effect = MinerException("URL missing")
+            self.assertFalse(await channel.send_watch())
+        self.assertIsNone(channel._spade_url)
+        channel._twitch.request.assert_not_called()
+
     async def test_switch_wakes_a_waiting_watch_loop(self):
         miner = Twitch.__new__(Twitch)
         miner._watching_restart = asyncio.Event()
