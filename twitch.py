@@ -887,7 +887,6 @@ class Twitch:
 
     async def _watch_sleep(self, delay: float) -> None:
         # we use wait_for here to allow an asyncio.sleep-like that can be ended prematurely
-        self._watching_restart.clear()
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._watching_restart.wait(), timeout=delay)
 
@@ -895,6 +894,7 @@ class Twitch:
     async def _watch_loop(self) -> NoReturn:
         interval: float = WATCH_INTERVAL.total_seconds()
         while True:
+            self._watching_restart.clear()
             channel: Channel = await self.watching_channel.get()
             if not channel.online:
                 # if the channel isn't online anymore, we stop watching it
@@ -905,17 +905,19 @@ class Twitch:
             last_sent: float = time()
             if not succeeded:
                 logger.log(CALL, f"Watch requested failed for channel: {channel.name}")
+                # A failed request is not evidence that Twitch advanced the drop.
+                await self._watch_sleep(interval - min(time() - last_sent, interval))
+                continue
             # wait ~20 seconds for a progress update
-            await asyncio.sleep(20)
+            await self._watch_sleep(20)
+            if self._watching_restart.is_set() or self.watching_channel.get_with_default(None) != channel:
+                continue
             if self.gui.progress.minute_almost_done():
                 # If the previous update was more than ~60s ago, and the progress tracker
                 # isn't counting down anymore, that means Twitch has temporarily
-                # stopped reporting drop's progress. To ensure the timer keeps at least somewhat
-                # accurate time, we can use GQL to query for the current drop,
-                # or even "pretend" mining as a last resort option.
+                # stopped reporting drop progress. Query Twitch for confirmed progress.
                 handled: bool = False
 
-                # Solution 1: use GQL to query for the currently mined drop status
                 try:
                     context = await self.gql_request(
                         GQL_QUERIES["CurrentDrop"].with_variables(
@@ -925,7 +927,7 @@ class Twitch:
                     drop_data: JsonType | None = (
                         context["data"]["currentUser"]["dropCurrentSession"]
                     )
-                except GQLException:
+                except (GQLException, KeyError, TypeError):
                     drop_data = None
                 if drop_data is not None:
                     gql_drop: TimedDrop | None = self._drops.get(drop_data["dropID"])
@@ -938,23 +940,10 @@ class Twitch:
                         logger.log(CALL, f"Drop progress from GQL: {drop_text}")
                         handled = True
 
-                # Solution 2: If GQL fails, figure out which campaign we're most likely mining
-                # right now, and then bump up the minutes on it's drops
+                # A missing response cannot establish that watch time was credited.
+                # Keep the last confirmed progress instead of displaying invented minutes.
                 if not handled:
-                    if (active_campaign := self.get_active_campaign(channel)) is not None:
-                        active_campaign.bump_minutes(channel)
-                        # NOTE: This usually gets overwritten below
-                        drop_text = f"Unknown drop ({active_campaign.game})"
-                        if (active_drop := active_campaign.first_drop) is not None:
-                            active_drop.display()
-                            drop_text = (
-                                f"{active_drop.name} ({active_drop.campaign.game}, "
-                                f"{active_drop.current_minutes}/{active_drop.required_minutes})"
-                            )
-                        logger.log(CALL, f"Drop progress from active search: {drop_text}")
-                        handled = True
-                    else:
-                        logger.log(CALL, "No active drop could be determined")
+                    logger.log(CALL, "Drop progress could not be confirmed; waiting for Twitch")
             await self._watch_sleep(interval - min(time() - last_sent, interval))
 
     @task_wrapper(critical=True)
@@ -1020,6 +1009,11 @@ class Twitch:
         watching_channel = self.watching_channel.get_with_default(None)
         if watching_channel is None or not self.can_watch(watching_channel):
             return True
+        # A channel chosen with the Switch button stays selected while it remains eligible.
+        selected_channel = self.gui.channels.get_selection()
+        if (selected_channel is not None and selected_channel == watching_channel
+                and self.can_watch(selected_channel)):
+            return False
         channel_order = self.get_priority(channel)
         watching_order = self.get_priority(watching_channel)
         return (
@@ -1031,9 +1025,12 @@ class Twitch:
         )
 
     def watch(self, channel: Channel, *, update_status: bool = True):
+        previous_channel = self.watching_channel.get_with_default(None)
         self.gui.tray.change_icon("active")
         self.gui.channels.set_watching(channel)
         self.watching_channel.set(channel)
+        if previous_channel != channel:
+            self.restart_watching()
         if update_status:
             status_text = _("status", "watching").format(channel=channel.name)
             self.print(status_text)
