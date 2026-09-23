@@ -13,7 +13,7 @@ import aiohttp
 from yarl import URL
 
 from utils import Game, json_minify, isonow
-from exceptions import MinerException, RequestException
+from exceptions import ExitRequest, MinerException, ReloadRequest, RequestException
 from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery
 
 if TYPE_CHECKING:
@@ -492,7 +492,9 @@ class Channel:
             ) as response:
                 if response.status == 204:
                     return True
-        except (RequestException, MinerException):
+        except (ExitRequest, ReloadRequest):
+            raise
+        except MinerException:
             pass
         # A cached URL may have expired. Rediscover it on the next attempt.
         self._spade_url = None
