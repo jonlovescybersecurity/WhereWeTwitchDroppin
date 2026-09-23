@@ -6,11 +6,81 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from channel import Channel
+from constants import ClientType
 from exceptions import ExitRequest, MinerException, ReloadRequest
-from twitch import Twitch
+from exceptions import LoginException
+from twitch import Twitch, _AuthState
 
 
 class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_miner_defaults_to_smart_tv_client(self):
+        with patch("twitch.GUIManager"), patch("twitch.WebsocketPool"):
+            miner = Twitch(SimpleNamespace())
+        self.assertIs(miner._client_type, ClientType.SMARTBOX)
+
+    async def test_device_login_uses_smart_tv_client(self):
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def json(self):
+                return {
+                    "device_code": "device", "user_code": "ABC123", "interval": 1,
+                    "verification_uri": "https://www.twitch.tv/activate", "expires_in": 1800,
+                }
+
+        class TokenResponse(Response):
+            async def json(self):
+                return {"access_token": "token"}
+
+        calls = []
+
+        def request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return Response() if url.endswith("/device") else TokenResponse()
+
+        login_form = SimpleNamespace(ask_enter_code=AsyncMock())
+        twitch = SimpleNamespace(_client_type=ClientType.SMARTBOX,
+                                 gui=SimpleNamespace(login=login_form), request=request)
+        auth = _AuthState(twitch)
+        auth.device_id = "device-id"
+        with patch("twitch.asyncio.sleep", new_callable=AsyncMock):
+            self.assertEqual(await auth._oauth_login(), "token")
+        self.assertEqual(calls[0][2]["data"]["client_id"], ClientType.SMARTBOX.CLIENT_ID)
+        self.assertEqual(calls[1][2]["data"]["client_id"], ClientType.SMARTBOX.CLIENT_ID)
+        login_form.ask_enter_code.assert_awaited_once()
+
+    def test_channel_page_stays_on_public_web_client(self):
+        channel = Channel.__new__(Channel)
+        channel._login = "example"
+        channel._twitch = SimpleNamespace(_client_type=ClientType.SMARTBOX)
+        self.assertEqual(str(channel.url), "https://www.twitch.tv/example")
+
+    async def test_device_login_reports_missing_code(self):
+        class Response:
+            status = 400
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def json(self):
+                return {"error": "invalid client"}
+
+        twitch = SimpleNamespace(_client_type=ClientType.SMARTBOX,
+                                 gui=SimpleNamespace(login=Mock()), request=lambda *a, **kw: Response())
+        auth = _AuthState(twitch)
+        auth.device_id = "device-id"
+        with self.assertRaisesRegex(LoginException, "rejected the device login"):
+            await auth._oauth_login()
+
     async def test_missing_watch_endpoint_is_retryable(self):
         channel = Channel.__new__(Channel)
         channel._stream = SimpleNamespace(spade_payload={})
