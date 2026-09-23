@@ -13,8 +13,8 @@ import aiohttp
 from yarl import URL
 
 from utils import Game, json_minify, isonow
-from exceptions import MinerException, RequestException
-from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery
+from exceptions import ExitRequest, MinerException, ReloadRequest, RequestException
+from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery, ClientType
 
 if TYPE_CHECKING:
     from twitch import Twitch
@@ -235,7 +235,8 @@ class Channel:
 
     @property
     def url(self) -> URLType:
-        return URLType(f"{self._twitch._client_type.CLIENT_URL}/{self._login}")
+        # The Smart TV login client does not serve public streamer pages with watch endpoints.
+        return URLType(f"{ClientType.WEB.CLIENT_URL}/{self._login}")
 
     @property
     def iid(self) -> str:
@@ -492,7 +493,9 @@ class Channel:
             ) as response:
                 if response.status == 204:
                     return True
-        except (RequestException, MinerException):
+        except (ExitRequest, ReloadRequest):
+            raise
+        except MinerException:
             pass
         # A cached URL may have expired. Rediscover it on the next attempt.
         self._spade_url = None
