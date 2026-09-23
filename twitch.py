@@ -152,6 +152,12 @@ class _AuthState:
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
                     response_json: JsonType = await response.json()
+                    if response.status != 200 or not isinstance(response_json, dict):
+                        raise LoginException("Twitch rejected the device login request")
+                    if not all(key in response_json for key in (
+                        "device_code", "user_code", "interval", "verification_uri", "expires_in"
+                    )):
+                        raise LoginException("Twitch did not provide a device authorization code")
                     device_code: str = response_json["device_code"]
                     user_code: str = response_json["user_code"]
                     interval: int = response_json["interval"]
@@ -445,7 +451,7 @@ class Twitch:
         # Do not modify the default, safe values.
         self._qgl_limiter = RateLimiter(capacity=5, window=1)
         # Client type, session and auth
-        self._client_type: ClientInfo = ClientType.ANDROID_APP
+        self._client_type: ClientInfo = ClientType.SMARTBOX
         self._session: aiohttp.ClientSession | None = None
         self._auth_state: _AuthState = _AuthState(self)
         # GUI
