@@ -484,15 +484,19 @@ class Channel:
     async def send_watch(self) -> bool:
         if self._stream is None:
             return False
-        if self._spade_url is None:
-            self._spade_url = await self.get_spade_url()
         try:
+            if self._spade_url is None:
+                self._spade_url = await self.get_spade_url()
             async with self._twitch.request(
                 "POST", self._spade_url, data=self._stream.spade_payload
             ) as response:
-                return response.status == 204
-        except RequestException:
-            return False
+                if response.status == 204:
+                    return True
+        except (RequestException, MinerException):
+            pass
+        # A cached URL may have expired. Rediscover it on the next attempt.
+        self._spade_url = None
+        return False
 
     # NOTE: This is currently unused.
     async def _send_watch_gql(self) -> bool:
